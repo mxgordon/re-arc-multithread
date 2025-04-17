@@ -2,18 +2,16 @@ import time
 import tqdm
 import os
 import json
+from multiprocessing import Pool
+from functools import partial
 
 from random import seed as set_seed
-
-import dsl
-from dsl import *
 
 import utils
 from utils import *
 
 import generators
 import verifiers
-
 
 
 def get_generators() -> dict:
@@ -145,6 +143,104 @@ def generate_dataset(
         json.dump(metadata, fp)
 
 
+def generate_challenge(n_examples: int,
+                       generators_mapper: dict,
+                       verifiers_mapper: dict,
+                       diff_lb: float,
+                       diff_ub: float,
+                       tasks_path: str,
+                       key: str) -> (str, dict):
+    """
+    Generates `n_examples` of a specific challenge given by `key`. It then writes to the appropriate file and returns
+    the key and the associated stats.
+
+    n_examples: number of examples to generate
+    generators_mapper: mapping structure for generators
+    verifiers_mapper: mapping structure for generators
+    diff_lb: lower bound for difficulty
+    diff_ub: upper bound for difficulty
+    tasks_path: which folder to save data to
+    key: name of the task
+    """
+    generator = generators_mapper[key]
+    verifier = verifiers_mapper[key]
+    seen = set()
+    examples = []
+    stats = {
+        'n_generations': 0, 'n_verified': 0, 'n_nondegenerate': 0,
+        'rng_difficulties': [], 'pso_difficulties': []
+    }
+
+    while len(examples) < n_examples:
+        example, identifier, success = None, None, True
+
+        try:
+            example = generator(diff_lb, diff_ub)
+            assert is_grid(example['input'])
+            assert is_grid(example['output'])
+            identifier = hash(example['input'])
+            stats['n_generations'] += 1
+        except:
+            success = False
+        try:
+            assert success and verifier(example['input']) == example['output']
+            stats['n_verified'] += 1
+        except:
+            success = False
+        try:
+            assert success and example['input'] != example['output']
+            stats['n_nondegenerate'] += 1
+        except:
+            success = False
+        if success and identifier not in seen:
+            examples.append(example)
+            seen.add(identifier)
+            stats['rng_difficulties'].append(get_rng_difficulty(example))
+            stats['pso_difficulties'].append(get_pso_difficulty(example))
+
+    with open(os.path.join(tasks_path, f'{key}.json'), 'w') as fp:
+        json.dump(examples, fp)
+
+    return key, stats
+
+
+def generate_dataset_multi(
+        path: str = 're_arc',
+        seed: int = 42,
+        n_examples: int = 1000,
+        diff_lb: float = 0,
+        diff_ub: float = 1,
+        n_processes: int = 24
+) -> None:
+    """
+    Generates dataset using `n_processes` processes in a Multiprocessing Pool
+
+    path: which folder to save data to
+    seed: for deterministic generation / reproducibility
+    n_examples: number of examples per task
+    diff_lb: lower bound for difficulty
+    diff_ub: upper bound for difficulty
+    n_processes: number of processes to utilize in the pool
+    """
+    set_seed(seed)
+    os.makedirs(path)
+    tasks_path = os.path.join(path, 'tasks')
+    os.makedirs(tasks_path)
+    generators_mapper = get_generators()
+    verifiers_mapper = get_verifiers()
+    keys = sorted(generators_mapper.keys())
+
+    with Pool(n_processes) as pool:
+        metadata_tuples = list(tqdm.tqdm(pool.imap(
+            partial(generate_challenge, n_examples, generators_mapper, verifiers_mapper, diff_lb, diff_ub, tasks_path),
+            keys), total=len(keys)))
+
+    metadata = dict(metadata_tuples)
+
+    with open(os.path.join(path, 'metadata.json'), 'w') as fp:
+        json.dump(metadata, fp)
+
+
 def demo_dataset(
     folder: str = 're_arc',
     n: int = 8,
@@ -202,3 +298,6 @@ def evaluate_verifiers_on_original_tasks() -> None:
     print(f'verification programs work for all examples for {n-k}/{n} tasks')
     print(f'verification fails (on one example) for tasks {failed_on}')
 
+
+if __name__ == '__main__':
+    generate_dataset(n_examples=5000)
